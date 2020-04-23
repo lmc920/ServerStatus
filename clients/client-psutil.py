@@ -4,12 +4,12 @@
 # 依赖于psutil跨平台库
 # 支持Python版本：2.7 to 3.7
 # 支持操作系统： Linux, Windows, OSX, Sun Solaris, FreeBSD, OpenBSD and NetBSD, both 32-bit and 64-bit architectures
-# 时间： 20191224
-# 说明: 默认情况下修改server和user就可以了。
-
+# 时间： 20200407
+# 说明: 默认情况下修改server和user就可以了。丢包率监测方向可以自定义，例如：CU = "www.facebook.com"。
 
 SERVER = "127.0.0.1"
 USER = "s01"
+
 
 
 PORT = 35601
@@ -25,7 +25,6 @@ import time
 import timeit
 import os
 import json
-import collections
 import psutil
 import sys
 import threading
@@ -57,35 +56,6 @@ def get_hdd():
 
 def get_cpu():
     return psutil.cpu_percent(interval=INTERVAL)
-
-class Traffic:
-    def __init__(self):
-        self.rx = collections.deque(maxlen=10)
-        self.tx = collections.deque(maxlen=10)
-    def get(self):
-        avgrx = 0; avgtx = 0
-        for name, stats in psutil.net_io_counters(pernic=True).items():
-            if "lo" in name or "tun" in name \
-                or "docker" in name or "veth" in name \
-                or "br-" in name or "vmbr" in name \
-                or "vnet" in name or "kube" in name:
-                continue
-            avgrx += stats.bytes_recv
-            avgtx += stats.bytes_sent
-
-        self.rx.append(avgrx)
-        self.tx.append(avgtx)
-        avgrx = 0; avgtx = 0
-
-        l = len(self.rx)
-        for x in range(l - 1):
-            avgrx += self.rx[x+1] - self.rx[x]
-            avgtx += self.tx[x+1] - self.tx[x]
-
-        avgrx = int(avgrx / l / INTERVAL)
-        avgtx = int(avgtx / l / INTERVAL)
-
-        return avgrx, avgtx
 
 def liuliang():
     NET_IN = 0
@@ -159,6 +129,15 @@ pingTime = {
     '189': 0,
     '10086': 0
 }
+netSpeed = {
+    'netrx': 0.0,
+    'nettx': 0.0,
+    'clock': 0.0,
+    'diff': 0.0,
+    'avgrx': 0,
+    'avgtx': 0
+}
+
 def _ping_thread(host, mark, port):
     lostPacket = 0
     allPacket = 0
@@ -186,9 +165,30 @@ def _ping_thread(host, mark, port):
             allPacket = 0
             startTime = endTime
 
-        time.sleep(1)
+        time.sleep(INTERVAL)
 
-def get_packetLostRate():
+def _net_speed():
+    while True:
+        avgrx = 0
+        avgtx = 0
+        for name, stats in psutil.net_io_counters(pernic=True).items():
+            if "lo" in name or "tun" in name \
+                    or "docker" in name or "veth" in name \
+                    or "br-" in name or "vmbr" in name \
+                    or "vnet" in name or "kube" in name:
+                continue
+            avgrx += stats.bytes_recv
+            avgtx += stats.bytes_sent
+        now_clock = time.time()
+        netSpeed["diff"] = now_clock - netSpeed["clock"]
+        netSpeed["clock"] = now_clock
+        netSpeed["netrx"] = int((avgrx - netSpeed["avgrx"]) / netSpeed["diff"])
+        netSpeed["nettx"] = int((avgtx - netSpeed["avgtx"]) / netSpeed["diff"])
+        netSpeed["avgrx"] = avgrx
+        netSpeed["avgtx"] = avgtx
+        time.sleep(INTERVAL)
+
+def get_realtime_date():
     t1 = threading.Thread(
         target=_ping_thread,
         kwargs={
@@ -213,12 +213,17 @@ def get_packetLostRate():
             'port': PORBEPORT
         }
     )
+    t4 = threading.Thread(
+        target=_net_speed,
+    )
     t1.setDaemon(True)
     t2.setDaemon(True)
     t3.setDaemon(True)
+    t4.setDaemon(True)
     t1.start()
     t2.start()
     t3.start()
+    t4.start()
 
 def byte_str(object):
     '''
@@ -246,7 +251,7 @@ if __name__ == '__main__':
         elif 'INTERVAL' in argc:
             INTERVAL = int(argc.split('INTERVAL=')[-1])
     socket.setdefaulttimeout(30)
-    get_packetLostRate()
+    get_realtime_date()
     while 1:
         try:
             print("Connecting...")
@@ -277,11 +282,8 @@ if __name__ == '__main__':
                 print(data)
                 raise socket.error
 
-            traffic = Traffic()
-            traffic.get()
             while 1:
                 CPU = get_cpu()
-                NetRx, NetTx = traffic.get()
                 NET_IN, NET_OUT = liuliang()
                 Uptime = get_uptime()
                 Load_1, Load_5, Load_15 = os.getloadavg() if 'linux' in sys.platform else (0.0, 0.0, 0.0)
@@ -308,8 +310,8 @@ if __name__ == '__main__':
                 array['hdd_total'] = HDDTotal
                 array['hdd_used'] = HDDUsed
                 array['cpu'] = CPU
-                array['network_rx'] = NetRx
-                array['network_tx'] = NetTx
+                array['network_rx'] = netSpeed.get("netrx")
+                array['network_tx'] = netSpeed.get("nettx")
                 array['network_in'] = NET_IN
                 array['network_out'] = NET_OUT
                 array['ip_status'] = IP_STATUS
